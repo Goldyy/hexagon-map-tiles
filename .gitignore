@@ -1,0 +1,16 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+*.tsbuildinfo
+.DS_Store
+.frugal-fable/
+.superpowers/
+tmp/
+
+# Internal planning/design docs and tooling — kept locally, never published.
+/CLAUDE.md
+/CONTEXT.md
+/PROJECT_PLAN.md
+/docs/
+/.claude/

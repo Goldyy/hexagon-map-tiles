@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+:root {
+  font-family: "Archivo Variable", system-ui, sans-serif;
+  color: #111111;
+  background: #ffffff;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+html { min-width: 320px; height: 100%; background: #ffffff; }
+body { margin: 0; min-width: 320px; height: 100%; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+::selection { background: #111111; color: #ffffff; }
+
+/* Space Mono — labels, numeric readouts, the location value, sub-labels. */
+.font-mono { font-family: "Space Mono", ui-monospace, "SFMono-Regular", Menlo, monospace; }
+
+/* The utilitarian uppercase label used above every control in the rail. */
+.lbl {
+  font-family: "Space Mono", monospace;
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #a29e95;
+}
+
+canvas { display: block; touch-action: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

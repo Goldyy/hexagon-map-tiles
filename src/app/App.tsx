@@ -230,31 +230,38 @@ export function App() {
   ];
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-white text-[#111]">
+    <div className="flex min-h-screen flex-col bg-white text-[#111] lg:h-screen lg:overflow-hidden">
       {/* ===== top bar ===== */}
-      <header className="flex h-[60px] flex-none items-center justify-between border-b border-[#ececec] px-6">
-        <div className="flex items-center gap-3">
+      <header className="flex h-[60px] flex-none items-center justify-between gap-3 border-b border-[#ececec] px-4 sm:px-6">
+        <div className="flex min-w-0 items-center gap-3">
           <span aria-hidden className="block flex-none" style={{ width: 20, height: 23, background: "#111", clipPath: HEX_CLIP }} />
-          <div className="flex flex-col leading-none">
-            <span className="text-[14px] font-bold tracking-[-0.01em]">Hexagon Map Tiles</span>
+          <div className="flex min-w-0 flex-col leading-none">
+            <span className="truncate text-[14px] font-bold tracking-[-0.01em]">Hexagon Map Tiles</span>
             <span className="lbl mt-1">OSM → 3D GLB</span>
           </div>
         </div>
-        <div className="flex items-center gap-2.5">
-          <Button variant="outline" className="gap-[7px] font-medium text-[#444]" onClick={shareLink}>
-            <span className="font-mono text-[11px]">↗</span> Share link
+        <div className="flex flex-none items-center gap-2">
+          <Button
+            variant="outline"
+            aria-label="Share link"
+            className="gap-[7px] px-3 font-medium text-[#444] sm:px-[15px]"
+            onClick={shareLink}
+          >
+            <span className="font-mono text-[11px]">↗</span>
+            <span className="hidden sm:inline">Share link</span>
           </Button>
           {status === "ready" && tile && (
-            <Button onClick={() => void download()}>
-              <Download size={14} /> Download GLB
+            <Button aria-label="Download GLB" className="px-3 sm:px-[17px]" onClick={() => void download()}>
+              <Download size={14} />
+              <span className="hidden sm:inline">Download GLB</span>
             </Button>
           )}
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         {/* ===== left rail ===== */}
-        <aside className="flex w-[326px] flex-none flex-col gap-[26px] overflow-auto border-r border-[#ececec] px-[26px] pb-6 pt-7">
+        <aside className="flex w-full flex-none flex-col gap-[26px] border-b border-[#ececec] px-5 pb-6 pt-7 sm:px-[26px] lg:w-[326px] lg:border-b-0 lg:border-r lg:overflow-auto">
           {/* location */}
           <div>
             <div className="lbl mb-2.5">Location</div>
@@ -448,7 +455,7 @@ export function App() {
         </aside>
 
         {/* ===== preview ===== */}
-        <main className="relative min-w-0 flex-1 overflow-hidden">
+        <main className="relative h-[62vh] w-full min-w-0 flex-none overflow-hidden lg:h-full lg:w-auto lg:flex-1">
           <div
             className="pointer-events-none absolute inset-0"
             style={{ background: "radial-gradient(circle at 50% 40%,#ffffff 0%,#f4f2ec 78%)" }}

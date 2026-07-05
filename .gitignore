@@ -2,6 +2,7 @@ node_modules/
 dist/
 test-results/
 playwright-report/
+.playwright-mcp/
 *.tsbuildinfo
 .DS_Store
 .frugal-fable/

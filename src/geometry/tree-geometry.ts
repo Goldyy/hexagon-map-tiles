@@ -50,16 +50,17 @@ export const TREE_TRIANGLES =
 export function buildTreesGeometry(placements: TreePlacement[]): BufferGeometry | null {
   if (placements.length === 0) return null;
 
-  const geometries: BufferGeometry[] = [];
-  for (const placement of placements) {
-    const instance = TEMPLATE.clone();
-    instance.scale(placement.scale, placement.scale, placement.scale);
-    instance.rotateY(placement.rotation);
-    instance.translate(placement.x, 0.05, -placement.z);
-    geometries.push(instance);
-  }
-
+  const geometries = placements.map((placement) => buildTreeGeometry(placement));
   const merged = mergeGeometries(geometries, false);
   for (const geometry of geometries) geometry.dispose();
   return merged;
+}
+
+/** Realise a single placement as its own geometry — one tree, one object. */
+export function buildTreeGeometry(placement: TreePlacement): BufferGeometry {
+  const instance = TEMPLATE.clone();
+  instance.scale(placement.scale, placement.scale, placement.scale);
+  instance.rotateY(placement.rotation);
+  instance.translate(placement.x, 0.05, -placement.z);
+  return instance;
 }

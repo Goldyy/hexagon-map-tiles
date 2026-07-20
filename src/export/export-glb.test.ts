@@ -6,6 +6,7 @@ import type {
   SerializedGeometry,
   SurfaceMetrics,
   TileMetrics,
+  TileParts,
   TreeMetrics,
   WaterMetrics,
 } from "../geometry/generate-tile";
@@ -66,6 +67,12 @@ const surfaceMetrics: SurfaceMetrics = {
 
 const treeMetrics: TreeMetrics = { mapped: 0, scattered: 0, capped: 0, triangles: 0 };
 
+// Empty parts exercise the merged-mesh fallback; per-part grouping is covered
+// by its own test below.
+function emptyParts(): TileParts {
+  return { buildings: [], roads: [], water: [], green: [], paths: [], rail: [], trees: [] };
+}
+
 function fullTile(buildingColors?: [number, number, number]): GeneratedTile {
   return {
     base: triangle(),
@@ -76,6 +83,7 @@ function fullTile(buildingColors?: [number, number, number]): GeneratedTile {
     pathSurfaces: triangle(),
     railSurfaces: triangle(),
     trees: triangle(),
+    parts: emptyParts(),
     metrics: tileMetrics,
     roadMetrics,
     waterMetrics,
@@ -96,6 +104,7 @@ function partialTile(): GeneratedTile {
     pathSurfaces: emptyGeometry(),
     railSurfaces: emptyGeometry(),
     trees: emptyGeometry(),
+    parts: emptyParts(),
     metrics: tileMetrics,
     roadMetrics,
     waterMetrics,
@@ -200,6 +209,33 @@ describe("exportGlb (v2 contract)", () => {
     expect(buildings).toBeInstanceOf(Mesh);
     const geometry = (buildings as InstanceType<typeof Mesh>).geometry;
     expect(Object.keys(geometry.attributes)).not.toContain("rise");
+  });
+
+  it("exports layers with parts as groups of individually named child meshes sharing one material", async () => {
+    const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
+    const { Mesh } = await import("three");
+    const tile = fullTile();
+    tile.parts.buildings = [
+      { name: "Building_way_1", geometry: triangle() },
+      { name: "Building_way_2", geometry: triangle() },
+    ];
+    tile.parts.trees = [{ name: "Tree_001", geometry: triangle() }];
+    const buffer = await exportGlb(tile, colors, metadata);
+    const gltf = await new GLTFLoader().parseAsync(buffer.slice(0), "");
+
+    // GLTFLoader realises the exported Group as a plain node (Object3D) whose
+    // children are the individually named element meshes.
+    const buildings = gltf.scene.getObjectByName("Buildings");
+    expect(buildings).toBeTruthy();
+    const children = buildings!.children;
+    expect(children.map((child) => child.name)).toEqual(["Building_way_1", "Building_way_2"]);
+    expect(children[0]).toBeInstanceOf(Mesh);
+    const [first, second] = children as InstanceType<typeof Mesh>[];
+    expect(first.material).toBe(second.material);
+
+    expect(gltf.scene.getObjectByName("Tree_001")).toBeInstanceOf(Mesh);
+    // Layers without parts keep the merged single-mesh form.
+    expect(gltf.scene.getObjectByName("RoadSurfaces")).toBeInstanceOf(Mesh);
   });
 
   it("preserves v1 metadata keys on scene.userData", async () => {

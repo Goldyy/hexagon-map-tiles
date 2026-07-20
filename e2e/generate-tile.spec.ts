@@ -23,7 +23,7 @@ test("user generates and downloads a Digital Tile Asset from coordinates", async
             type: "way",
             id: 10,
             nodes: [1, 2, 3, 4, 1],
-            tags: { building: "yes", height: "12" },
+            tags: { building: "yes", height: "12", "addr:street": "Rheinstraße", "addr:housenumber": "12" },
           },
           {
             type: "way",
@@ -55,6 +55,18 @@ test("user generates and downloads a Digital Tile Asset from coordinates", async
   await expect(summary.getByText("1 road")).toBeVisible();
   await expect(summary.getByText("1 water")).toBeVisible();
   await expect(page.getByRole("button", { name: "Download GLB" })).toBeEnabled();
+
+  // Mark a building by its address: it appears in the marked list and can be
+  // unmarked from there.
+  await page.getByLabel("Mark address").fill("Rheinstr. 12");
+  await page.getByRole("button", { name: "Mark this address red" }).click();
+  const markedList = page.getByRole("list", { name: "Marked buildings list" });
+  await expect(markedList.getByText("Rheinstraße 12")).toBeVisible();
+  await page.getByLabel("Mark address").fill("Unbekannte Straße 99");
+  await page.getByRole("button", { name: "Mark this address red" }).click();
+  await expect(page.getByText("No building with that address in this tile.", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Unmark Rheinstraße 12" }).click();
+  await expect(markedList).not.toBeVisible();
 
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download GLB" }).click();

@@ -1,6 +1,7 @@
 import osmtogeojson from "osmtogeojson";
 
 import type {
+  SourceAddress,
   SourceBuilding,
   SourceGreen,
   SourcePath,
@@ -23,6 +24,7 @@ export interface NormalizedOsm {
   paths: SourcePath[];
   rail: SourceRail[];
   trees: SourceTree[];
+  addresses: SourceAddress[];
   sourceTimestamp: string | null;
 }
 
@@ -76,6 +78,7 @@ export function normalizeMapData(input: OverpassResponse): NormalizedOsm {
   const paths: SourcePath[] = [];
   const rail: SourceRail[] = [];
   const trees: SourceTree[] = [];
+  const addresses: SourceAddress[] = [];
 
   for (const feature of collection.features) {
     const { tags: nestedTags, id: _id, ...flatTags } = feature.properties ?? {};
@@ -274,6 +277,16 @@ export function normalizeMapData(input: OverpassResponse): NormalizedOsm {
       });
     }
 
+    // Standalone address points (the common "address node inside the building
+    // outline" mapping style) — matched onto buildings during generation.
+    if (tags["addr:housenumber"] && feature.geometry && feature.geometry.type === "Point") {
+      addresses.push({
+        position: feature.geometry.coordinates as SourceAddress["position"],
+        street: tags["addr:street"],
+        housenumber: tags["addr:housenumber"],
+      });
+    }
+
     if ((!tags.building && !tags["building:part"]) || !feature.geometry) continue;
     if (feature.geometry.type !== "Polygon" && feature.geometry.type !== "MultiPolygon") continue;
 
@@ -305,6 +318,7 @@ export function normalizeMapData(input: OverpassResponse): NormalizedOsm {
     paths,
     rail,
     trees,
+    addresses,
     sourceTimestamp: input.osm3s?.timestamp_osm_base ?? null,
   };
 }

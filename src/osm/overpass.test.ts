@@ -85,7 +85,7 @@ describe("Overpass map data", () => {
     expect(query).toContain('way["area:highway"~"^(footway|cycleway|path|steps)$"]');
   });
 
-  it("caches under the v4 key prefix", async () => {
+  it("caches under the v5 key prefix", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
       new Response(JSON.stringify({ elements: [] }), {
         status: 200,
@@ -99,6 +99,6 @@ describe("Overpass map data", () => {
     const { openDB } = await import("idb");
     const db = await openDB("hexagon-map-tiles", 1);
     const keys = (await db.getAllKeys("responses")) as string[];
-    expect(keys.some((key) => key.startsWith("overpass:v4:5.000000:5.000000:500"))).toBe(true);
+    expect(keys.some((key) => key.startsWith("overpass:v5:5.000000:5.000000:500"))).toBe(true);
   });
 });

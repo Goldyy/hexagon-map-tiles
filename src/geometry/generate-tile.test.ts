@@ -49,6 +49,49 @@ describe("Digital Tile Asset generation", () => {
     expect(tile.treeMetrics).toEqual({ mapped: 0, scattered: 0, capped: 0, triangles: 0 });
   });
 
+  it("carries a building's OSM addresses onto its parts — tagged and from contained address nodes", () => {
+    const square: [number, number][] = [
+      [-0.0001, -0.0001],
+      [0.0001, -0.0001],
+      [0.0001, 0.0001],
+      [-0.0001, 0.0001],
+      [-0.0001, -0.0001],
+    ];
+    const shifted = square.map(([x, y]) => [x + 0.001, y] as [number, number]);
+    const result = generateTile(
+      { center: { latitude: 0, longitude: 0 }, span: 500 },
+      {
+        buildings: [
+          {
+            id: "way/1",
+            tags: { building: "yes", "addr:street": "Rheinstraße", "addr:housenumber": "12" },
+            polygons: [[square]],
+          },
+          { id: "way/2", tags: { building: "yes" }, polygons: [[shifted]] },
+        ],
+        roads: [],
+        water: [],
+        green: [],
+        paths: [],
+        rail: [],
+        trees: [],
+        addresses: [
+          // Inside way/2: supplies its address; inside way/1: adds a second one.
+          { position: [0.001, 0], street: "Oxfordstraße", housenumber: "3" },
+          { position: [0, 0.00005], street: "Rheinstraße", housenumber: "12b" },
+          // Outside both buildings: attached to neither.
+          { position: [0.005, 0.005], street: "Anderswo", housenumber: "1" },
+        ],
+      },
+    );
+    expect(result.parts.buildings[0].addresses).toEqual([
+      { street: "Rheinstraße", housenumber: "12" },
+      { street: "Rheinstraße", housenumber: "12b" },
+    ]);
+    expect(result.parts.buildings[1].addresses).toEqual([{ street: "Oxfordstraße", housenumber: "3" }]);
+    expect(result.parts.buildings[0].footprint?.[0]?.length).toBeGreaterThan(3);
+  });
+
   it("creates a Tile Base and fallback-height Building Massing", () => {
     const result = generateTile(
       { center: { latitude: 0, longitude: 0 }, span: 500 },

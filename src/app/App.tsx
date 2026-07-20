@@ -5,7 +5,10 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
+import { findBuildingsAtCoordinate, findBuildingsByAddress, formatAddresses } from "@/domain/address";
 import { parseCoordinates, type Coordinates } from "@/domain/location";
+import { COLOR_SLOT_OPTIONS, reducePalette, type ColorSlotCount } from "@/domain/print-palette";
+import { printSize, type PrintFit } from "@/domain/print-size";
 import { DEFAULT_THEME, THEMES, themeById } from "@/domain/theme";
 import { parseTileUrl, serializeTileUrl } from "@/domain/tile-url";
 import type { TileColors } from "@/export/export-glb";
@@ -40,6 +43,19 @@ const LAYER_FIELDS: readonly { key: keyof LayerToggles; label: string }[] = [
   { key: "pathsRail", label: "Paths & rail" },
   { key: "trees", label: "Trees" },
 ];
+
+// Live bed-fit verdict under the Tile Span slider: detail fidelity is fixed
+// (1:2000), so the printed model grows with the span — dot color and copy per
+// size tier (see domain/print-size for the thresholds).
+const PRINT_FIT: Record<PrintFit, { color: string; label: string }> = {
+  any: { color: "#3d8a40", label: "Fits practically every printer bed." },
+  standard: { color: "#3d8a40", label: "Fits a standard 256 mm bed (X1/P1/MK4 class)." },
+  large: { color: "#b98511", label: "Needs a large-format bed (350 mm) — or print in sections." },
+  "too-large": {
+    color: "#c2311f",
+    label: "Larger than common printer beds — reduce the Tile Span.",
+  },
+};
 
 // The Custom theme is an App-level concept layered over the preset + colour-override
 // URL model: a share URL still carries `theme=<preset>` (the seed, for the preview
@@ -76,6 +92,10 @@ export function App() {
   const isCustom = themeId === CUSTOM_THEME_ID;
   const activeEnvironment = themeById(isCustom ? customSourceId : themeId).environment;
   const colors: TileColors = isCustom ? (customColors ?? DEFAULT_THEME.colors) : themeById(themeId).colors;
+  // Filament budget: how many colors the printer holds. The reduced palette
+  // drives the preview, the legend, and both exports — WYSIWYG for the print.
+  const [colorSlots, setColorSlots] = useState<ColorSlotCount>("all");
+  const palette = useMemo(() => reducePalette(colors, colorSlots), [colors, colorSlots]);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [places, setPlaces] = useState<PlaceResult[]>([]);
@@ -86,6 +106,75 @@ export function App() {
   const [tileSpan, setTileSpan] = useState(shared?.span ?? 500);
   const [center, setCenter] = useState<Coordinates | null>(shared?.center ?? null);
   const [sourceTimestamp, setSourceTimestamp] = useState<string | null>(null);
+  // Buildings the user click-marked red in the preview (by part name). Cleared
+  // on every regeneration — part names belong to one generated tile.
+  const [redBuildings, setRedBuildings] = useState<ReadonlySet<string>>(new Set());
+  const [addressQuery, setAddressQuery] = useState("");
+  const [addressError, setAddressError] = useState<string | null>(null);
+  const [addressSearching, setAddressSearching] = useState(false);
+
+  // Display label per marked building: its OSM addresses when known (from
+  // building tags or contained address nodes), otherwise the part name with
+  // the OSM id ("way 123456").
+  const markedLabel = useMemo(() => {
+    const addressByName = new Map(
+      (tile?.parts.buildings ?? []).map((part) => [part.name, formatAddresses(part.addresses)]),
+    );
+    return (name: string) =>
+      addressByName.get(name) ?? name.replace(/^Building_/, "").replace(/_/g, " ");
+  }, [tile]);
+
+  // The marked list, grouped by label: a building clipped into several parts
+  // (or an address shared by several parts) shows once and unmarks as one.
+  const markedEntries = useMemo(() => {
+    const groups = new Map<string, string[]>();
+    for (const name of redBuildings) {
+      const label = markedLabel(name);
+      groups.set(label, [...(groups.get(label) ?? []), name]);
+    }
+    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [redBuildings, markedLabel]);
+
+  const markParts = (names: string[]) => {
+    setRedBuildings((previous) => new Set([...previous, ...names]));
+    setAddressQuery("");
+    setAddressError(null);
+  };
+
+  const addMarkedAddress = async () => {
+    if (!tile || !center || addressSearching) return;
+    const local = findBuildingsByAddress(tile.parts.buildings, addressQuery);
+    if (local.length > 0) {
+      markParts(local.map((part) => part.name));
+      return;
+    }
+    // Geocoder fallback, like the Location field: resolve the address via
+    // Nominatim and mark the building whose footprint contains the hit.
+    setAddressSearching(true);
+    try {
+      const places = await searchAddress(addressQuery);
+      for (const place of places) {
+        const hits = findBuildingsAtCoordinate(tile.parts.buildings, center, place);
+        if (hits.length > 0) {
+          markParts(hits.map((part) => part.name));
+          return;
+        }
+      }
+      setAddressError("No building with that address in this tile. Use street and house number.");
+    } catch (cause) {
+      setAddressError(cause instanceof Error ? cause.message : "Address search failed.");
+    } finally {
+      setAddressSearching(false);
+    }
+  };
+
+  const unmark = (names: string[]) => {
+    setRedBuildings((previous) => {
+      const next = new Set(previous);
+      for (const name of names) next.delete(name);
+      return next;
+    });
+  };
   const [previewRevision, setPreviewRevision] = useState(0);
   const generation = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
@@ -134,6 +223,9 @@ export function App() {
         );
         if (current !== generation.current) return;
         setTile(generated);
+        setRedBuildings(new Set());
+        setAddressQuery("");
+        setAddressError(null);
         setTileSpan(span);
         setCenter(nextCenter);
         setSourceTimestamp(normalized.sourceTimestamp);
@@ -170,19 +262,61 @@ export function App() {
     }
   };
 
+  const saveBlob = (buffer: ArrayBuffer, mimeType: string, filename: string) => {
+    const url = URL.createObjectURL(new Blob([buffer], { type: mimeType }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const tileFilename = (extension: string) =>
+    center ? `hex-tile-${center.latitude.toFixed(4)}-${center.longitude.toFixed(4)}-${span}m.${extension}` : "";
+
+  const toggleRedBuilding = useCallback((name: string) => {
+    setRedBuildings((previous) => {
+      const next = new Set(previous);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }, []);
+
   const download = async () => {
     if (!tile || !center) return;
     try {
       const { exportGlb } = await import("@/export/export-glb");
-      const buffer = await exportGlb(tile, colors, { center, span, sourceTimestamp }, { useOsmColors });
-      const url = URL.createObjectURL(new Blob([buffer], { type: "model/gltf-binary" }));
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `hex-tile-${center.latitude.toFixed(4)}-${center.longitude.toFixed(4)}-${span}m.glb`;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      const buffer = await exportGlb(
+        tile,
+        palette.colors,
+        { center, span, sourceTimestamp },
+        { useOsmColors, redBuildings },
+      );
+      saveBlob(buffer, "model/gltf-binary", tileFilename("glb"));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "GLB export failed.");
+      setStatus("error");
+    }
+  };
+
+  // Print export: two slicer-ready OBJs — the map (one named object per
+  // building/surface/tree, printable minimum thicknesses enforced, palette
+  // colors embedded as vertex colors) and the brown display tray it drops
+  // into, printed separately. Browsers may ask once to allow both downloads.
+  const downloadPrint = async () => {
+    if (!tile || !center) return;
+    try {
+      const { exportObj, exportTrayObj } = await import("@/export/export-obj");
+      const metadata = { center, span, sourceTimestamp };
+      const map = exportObj(tile, palette.colors, metadata, { redBuildings });
+      const tray = exportTrayObj(metadata, { color: palette.frame });
+      const encode = (text: string) => new TextEncoder().encode(text).buffer as ArrayBuffer;
+      const stem = tileFilename("obj").replace(/\.obj$/, "");
+      saveBlob(encode(map), "model/obj", `${stem}-map.obj`);
+      saveBlob(encode(tray), "model/obj", `${stem}-tray.obj`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "OBJ export failed.");
       setStatus("error");
     }
   };
@@ -251,10 +385,21 @@ export function App() {
             <span className="hidden sm:inline">Share link</span>
           </Button>
           {status === "ready" && tile && (
-            <Button aria-label="Download GLB" className="px-3 sm:px-[17px]" onClick={() => void download()}>
-              <Download size={14} />
-              <span className="hidden sm:inline">Download GLB</span>
-            </Button>
+            <>
+              <Button
+                variant="outline"
+                aria-label="Download OBJ (print)"
+                className="gap-[7px] px-3 font-medium text-[#444] sm:px-[15px]"
+                onClick={() => void downloadPrint()}
+              >
+                <Download size={14} />
+                <span className="hidden sm:inline">Download OBJ (print)</span>
+              </Button>
+              <Button aria-label="Download GLB" className="px-3 sm:px-[17px]" onClick={() => void download()}>
+                <Download size={14} />
+                <span className="hidden sm:inline">Download GLB</span>
+              </Button>
+            </>
           )}
         </div>
       </header>
@@ -321,6 +466,32 @@ export function App() {
             <div className="mt-2.5 flex justify-between font-mono text-[9px] tracking-[0.1em] text-[#c2beb5]">
               <span>100 M</span><span>2000 M</span>
             </div>
+
+            {/* Live print-size readout: detail fidelity is fixed at 1:2000, so
+                the printed model grows with the span — show how large, and
+                whether it still fits a printer bed. */}
+            {(() => {
+              const size = printSize(span);
+              const verdict = PRINT_FIT[size.fit];
+              return (
+                <div className="mt-3 space-y-1.5 rounded-[11px] border border-[#e0ded8] p-3 text-[11.5px] leading-[1.5] text-[#6f6a60]">
+                  <div className="flex items-baseline justify-between">
+                    <span>Printed model</span>
+                    <span className="font-mono text-[11px] text-[#3f3b34]">
+                      {(size.widthMm / 10).toFixed(1)} cm wide · 1:{size.ratio}
+                    </span>
+                  </div>
+                  <div className="flex items-start gap-2 pt-0.5" aria-label="Printability">
+                    <span
+                      className="mt-[3px] size-2 flex-none rounded-full"
+                      style={{ backgroundColor: verdict.color }}
+                      aria-hidden
+                    />
+                    <span>{verdict.label}</span>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {/* theme */}
@@ -411,6 +582,96 @@ export function App() {
             )}
           </div>
 
+          {/* print colors: filament budget folding layers into N color slots */}
+          <div>
+            <div className="lbl mb-3">Print colors</div>
+            <Button
+              variant={colorSlots === "filament" ? "default" : "outline"}
+              aria-pressed={colorSlots === "filament"}
+              className={`mb-2 w-full ${colorSlots === "filament" ? "" : "text-[#555]"}`}
+              onClick={() => setColorSlots("filament")}
+            >
+              Green · White · Blue · Red
+            </Button>
+            <div className="grid grid-cols-5 gap-2" role="group" aria-label="Print color count">
+              {COLOR_SLOT_OPTIONS.map((option) => (
+                <Button
+                  key={String(option)}
+                  variant={colorSlots === option ? "default" : "outline"}
+                  aria-pressed={colorSlots === option}
+                  className={colorSlots === option ? "w-full px-0" : "w-full px-0 text-[#555]"}
+                  onClick={() => setColorSlots(option)}
+                >
+                  {option === "all" ? "All" : option}
+                </Button>
+              ))}
+            </div>
+            <p className="mt-[9px] px-0.5 text-[11.5px] leading-[1.5] text-[#a8a49b]">
+              How many filament colors the preview and exports may use. Red-marked buildings add one extra; the
+              brown tray is a separate print.
+            </p>
+          </div>
+
+          {/* marked buildings: address list + add-by-address */}
+          {status === "ready" && tile && (
+            <div>
+              <div className="lbl mb-3">Marked buildings</div>
+              <div className="flex gap-2">
+                <div className="flex h-[38px] min-w-0 flex-1 items-center rounded-[10px] border border-[#e0ded8] px-3 focus-within:border-[#d4d1c9]">
+                  <Input
+                    aria-label="Mark address"
+                    placeholder="Street and house number"
+                    value={addressQuery}
+                    onChange={(event) => {
+                      setAddressQuery(event.target.value);
+                      setAddressError(null);
+                    }}
+                    onKeyDown={(event) => event.key === "Enter" && void addMarkedAddress()}
+                  />
+                </div>
+                <Button
+                  variant="outline"
+                  aria-label="Mark this address red"
+                  className="h-[38px] flex-none px-3 text-[#555]"
+                  disabled={addressSearching}
+                  onClick={() => void addMarkedAddress()}
+                >
+                  {addressSearching ? "…" : "Add"}
+                </Button>
+              </div>
+              {addressError && (
+                <p className="mt-2 rounded-[10px] border border-red-900/12 bg-red-700/[0.06] p-2.5 text-[11.5px] leading-[1.5] text-red-900">
+                  {addressError}
+                </p>
+              )}
+              {markedEntries.length > 0 ? (
+                <ul className="mt-2 space-y-1" aria-label="Marked buildings list">
+                  {markedEntries.map(([label, names]) => (
+                    <li
+                      key={label}
+                      className="flex items-center gap-2.5 rounded-[10px] border border-[#e0ded8] py-2 pl-3 pr-1.5 text-[12.5px] text-[#3f3b34]"
+                    >
+                      <span className="size-2 flex-none rounded-full bg-[#c2311f]" aria-hidden />
+                      <span className="min-w-0 flex-1 truncate">{label}</span>
+                      <button
+                        type="button"
+                        aria-label={`Unmark ${label}`}
+                        className="grid size-6 flex-none place-items-center rounded-md text-[#8a857b] transition-colors hover:bg-[#faf9f7] hover:text-[#111]"
+                        onClick={() => unmark(names)}
+                      >
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-[9px] px-0.5 text-[11.5px] leading-[1.5] text-[#a8a49b]">
+                  Click a building in the preview or add an address to mark it red.
+                </p>
+              )}
+            </div>
+          )}
+
           {/* generate */}
           <Button
             className="h-[50px] w-full flex-none gap-[9px] rounded-[12px] text-[14px]"
@@ -437,7 +698,7 @@ export function App() {
                 {error}
               </p>
             )}
-            {status === "ready" && tile && <TileSummary tile={tile} colors={colors} />}
+            {status === "ready" && tile && <TileSummary tile={tile} colors={palette.colors} />}
           </div>
 
           <p className="mt-auto pt-2 text-[10px] leading-[1.5] text-[#bdb9b0]">
@@ -467,6 +728,14 @@ export function App() {
             {status === "ready" ? "Live model" : "Preview studio"}
           </div>
 
+          {/* Click-to-mark hint + marked counter. */}
+          {status === "ready" && tile && tile.parts.buildings.length > 0 && (
+            <div className="font-mono absolute left-6 top-[62px] z-10 flex items-center gap-2 rounded-full border border-[#ececec] bg-white px-3.5 py-2 text-[9px] uppercase tracking-[0.16em] text-[#4a463e] shadow-[0_1px_3px_rgba(0,0,0,.04)]">
+            <span className="size-[7px] rounded-full bg-[#c2311f]" />
+            {redBuildings.size > 0 ? `${redBuildings.size} marked red` : "Click a building to mark it red"}
+          </div>
+          )}
+
           {/* reset view */}
           <button
             type="button"
@@ -488,10 +757,13 @@ export function App() {
               <TilePreview
                 key={previewRevision}
                 tile={tile}
-                colors={colors}
+                colors={palette.colors}
                 environment={activeEnvironment}
                 span={tileSpan}
                 useOsmColors={useOsmColors}
+                redBuildings={redBuildings}
+                onBuildingClick={toggleRedBuilding}
+                frameColor={palette.frame}
               />
             </Suspense>
           ) : (
@@ -519,7 +791,7 @@ export function App() {
                   key={stat.key}
                   className="inline-flex items-center gap-[7px] rounded-full border border-[#ececec] bg-white px-3 py-[7px] text-[11px] text-[#3f3b34]"
                 >
-                  <span className="size-2 rounded-full" style={{ backgroundColor: colors[stat.key] }} />
+                  <span className="size-2 rounded-full" style={{ backgroundColor: palette.colors[stat.key] }} />
                   {stat.count} {stat.label}
                 </span>
               ))}

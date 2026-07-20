@@ -1,6 +1,6 @@
 # Hexagon Map Tiles
 
-Static browser app that converts an address or latitude/longitude into a clipped hexagonal GLB containing OpenStreetMap Building Massing, Road Surfaces, Water Surfaces, Green Surfaces, Path Surfaces, Rail Surfaces, and Trees.
+Static browser app that converts an address or latitude/longitude into a clipped hexagonal 3D tile containing OpenStreetMap Building Massing, Road Surfaces, Water Surfaces, Green Surfaces, Path Surfaces, Rail Surfaces, and Trees — exported as a GLB (rendering) or a print-ready OBJ (3D printing), with every building, surface polygon, and tree as an individually named object.
 
 ## Features
 
@@ -10,6 +10,7 @@ Static browser app that converts an address or latitude/longitude into a clipped
 - A live Three.js preview with a rise-in reveal animation for buildings, matching the coordinate system and geometry of the downloaded GLB exactly — preview and export are built from the same generated buffers.
 - Shareable URLs that round-trip location, span, theme, color overrides, layer toggles, and OSM-color mode.
 - A triangle-budget guard (500,000 generated triangles) that aborts cleanly and asks you to reduce Tile Span, rather than silently simplifying geometry.
+- A slicer-ready OBJ print export — fixed 1:2000 detail fidelity with a live model-size readout, printable minimum thicknesses enforced — where the tile base and every element are separate objects (see "Print a tile (OBJ export)").
 
 ## Develop
 
@@ -81,7 +82,20 @@ const trees = gltf.scene.getObjectByName("Trees");
 if (green instanceof Mesh) green.material = new MeshStandardMaterial({ color: "#4c7a3d" });
 ```
 
-Exports use meters, Y-up, `+X` east, and `-Z` north, with Tile Center at `(0, 0, 0)`. Up to eight named mesh/material pairs are present: `TileBase`/`TileBaseMaterial` (always present), `Buildings`/`BuildingsMaterial`, `RoadSurfaces`/`RoadSurfaceMaterial`, `WaterSurfaces`/`WaterSurfaceMaterial`, `GreenSurfaces`/`GreenSurfaceMaterial`, `PathSurfaces`/`PathSurfaceMaterial`, `RailSurfaces`/`RailSurfaceMaterial`, and `Trees`/`TreesMaterial`. Every mesh other than `TileBase` is omitted entirely when its layer had no data — treat them all as optional. `scene.userData.layers` lists exactly which meshes made it into a given export. When OSM colors are enabled, `BuildingsMaterial` is left white and per-vertex colors carry the palette, so recolor the geometry's `color` attribute rather than the material in that mode.
+Exports use meters, Y-up, `+X` east, and `-Z` north, with Tile Center at `(0, 0, 0)`. Up to eight named layer/material pairs are present: `TileBase`/`TileBaseMaterial` (always present, a single mesh), `Buildings`/`BuildingsMaterial`, `RoadSurfaces`/`RoadSurfaceMaterial`, `WaterSurfaces`/`WaterSurfaceMaterial`, `GreenSurfaces`/`GreenSurfaceMaterial`, `PathSurfaces`/`PathSurfaceMaterial`, `RailSurfaces`/`RailSurfaceMaterial`, and `Trees`/`TreesMaterial`. Every layer other than `TileBase` is a **group of individually named child meshes** — one mesh per element (`Building_way_123456`, `Road_001`, `Tree_042`, …) — all sharing that layer's material, so single elements can be selected, recolored, or moved on their own. A layer is omitted entirely when it had no data — treat them all as optional. `scene.userData.layers` lists exactly which layers made it into a given export. When OSM colors are enabled, `BuildingsMaterial` is left white and per-vertex colors carry the palette, so recolor the geometry's `color` attribute rather than the material in that mode. To restyle a whole layer, traverse the group and swap each child mesh's material (they share one instance, so assigning to the first child's material also works).
+
+## Print a tile (OBJ export)
+
+The "Download OBJ (print)" button produces **two** slicer-ready `.obj` files for two separate prints (the browser may ask once to allow both downloads):
+
+- `…-map.obj` — the map: tile base plus **every element as a separate, named object** (each building carries its OSM id; each road/water/green/path/rail polygon and each tree is its own body). Palette colors are embedded as **per-vertex colors** on the `v` lines — Bambu Studio and OrcaSlicer read colored OBJs natively and offer per-color filament mapping; buildings click-marked red carry red vertex colors (and a `RED_` name prefix). PrusaSlicer and Cura ignore vertex colors and import the plain geometry.
+- `…-tray.obj` — the brown display **tray** (`TileTray`): a hexagonal shell with a full floor under the model and a surrounding wall. Print it separately (e.g. in brown), then seat the printed map inside — it drops in with 0.25 mm of play per side and the wall rises a 1.5 mm lip above the map's base.
+
+- Detail fidelity is fixed at **1:2000** (0.5 mm per real-world meter — a 2 m path prints 1 mm wide, comfortably above nozzle width), so the printed size grows with the Tile Span: ~157 mm at 250 m span, ~301 mm at 500 m. A live readout under the Tile Span slider shows the resulting model width and whether it fits a printer bed. Both files are millimeters, Z-up, resting on the build plate at `z = 0` — print as-is, no rescaling needed.
+- The preview renders the assembled result — the map seated in its tray — true to the printed proportions.
+- A **Print colors** control folds the palette to as many colors as the printer holds filaments: the fixed **Green · White · Blue · Red** kit (white plate and linework, red buildings, green nature, blue water; brown tray printed separately) or generic budgets (3/4/5/6/All) along curated groups. The reduced palette drives the preview, the legend, and both exports.
+- Everything visible is printable: ground surfaces are thickened to at least 0.6 mm, buildings to at least 1 mm, and tree trunks to at least 1 mm diameter. Every element sits exactly on top of the base plate (never embedded into it), so the plate's layers slice in a single color and filament changes along Z are minimized.
+- Because the scale is fixed, detail quality is identical at every Tile Span — only the printed footprint changes. Spans up to ~400 m fit a standard 256 mm bed; beyond ~550 m the model outgrows common printers.
 
 ### Reproducing the rise animation
 

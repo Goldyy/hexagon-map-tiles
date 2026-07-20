@@ -22,7 +22,7 @@ import { resolveGreenKind } from "./green-surface";
 import { resolvePathWidth, type PathWidthSource } from "./path-surface";
 import { resolveRailWidth, type RailWidthSource } from "./rail-surface";
 import { resolveRoadWidth, type RoadWidthSource } from "./road-surface";
-import { buildTreesGeometry, TREE_TRIANGLES } from "./tree-geometry";
+import { buildTreeGeometry, TREE_TRIANGLES } from "./tree-geometry";
 import { pointInPolygon, scatterTrees } from "./tree-scatter";
 import { resolveWaterWidth, type WaterWidthSource } from "./water-surface";
 import { FOREST_TAGS } from "../osm/tags";
@@ -78,6 +78,17 @@ export interface SourceTree {
   position: Position; // [longitude, latitude]
 }
 
+/**
+ * A standalone OSM address point (`addr:housenumber` node). Common mapping
+ * style where addresses live as nodes inside the building outline instead of
+ * as tags on the building itself.
+ */
+export interface SourceAddress {
+  position: Position; // [longitude, latitude]
+  street?: string;
+  housenumber?: string;
+}
+
 export interface TileSources {
   buildings: SourceBuilding[];
   roads: SourceRoad[];
@@ -86,6 +97,7 @@ export interface TileSources {
   paths: SourcePath[];
   rail: SourceRail[];
   trees: SourceTree[];
+  addresses?: SourceAddress[];
 }
 
 export interface LayerToggles {
@@ -109,6 +121,48 @@ export interface SerializedGeometry {
   indices: Uint32Array;
   rise?: Float32Array;
   colors?: Float32Array;
+}
+
+/** Postal address carried on a building's OSM tags (either field may be absent). */
+export interface PartAddress {
+  street?: string;
+  housenumber?: string;
+}
+
+/**
+ * One individually addressable element of a layer — a single building, one
+ * contiguous ground-surface polygon, or one tree. `name` is stable and unique
+ * within the tile and becomes the object name in the GLB/OBJ exports, so
+ * downstream tools (slicers, Blender) can select each element on its own.
+ * Buildings additionally carry their OSM addresses — from tags on the
+ * building itself and from address nodes inside its outline — so the app can
+ * list and look up marked buildings by street and house number. Corner
+ * buildings and apartment blocks often carry several.
+ */
+export interface TilePart {
+  name: string;
+  geometry: SerializedGeometry;
+  addresses?: PartAddress[];
+  /**
+   * The clipped ground outline in projected meters (`[east, north]` rings,
+   * outer first) — lets the app locate the building under a geocoded point.
+   */
+  footprint?: [number, number][][];
+}
+
+/**
+ * The per-element breakdown of every layer. The merged per-layer geometries on
+ * `GeneratedTile` stay the preview's data source; `parts` carries the same
+ * triangles split per element for exports that need individual objects.
+ */
+export interface TileParts {
+  buildings: TilePart[];
+  roads: TilePart[];
+  water: TilePart[];
+  green: TilePart[];
+  paths: TilePart[];
+  rail: TilePart[];
+  trees: TilePart[];
 }
 
 export interface TileMetrics {
@@ -164,6 +218,7 @@ export interface GeneratedTile {
   pathSurfaces: SerializedGeometry;
   railSurfaces: SerializedGeometry;
   trees: SerializedGeometry;
+  parts: TileParts;
   metrics: TileMetrics;
   roadMetrics: RoadMetrics;
   waterMetrics: WaterMetrics;
@@ -373,7 +428,7 @@ function extrudeGroundSurfaces(
   polygons: Polygon[],
   budgetSoFar: number,
   onBudgetExceeded: () => void,
-): { geometry: BufferGeometry | null; triangles: number; count: number } {
+): { geometry: BufferGeometry | null; triangles: number; count: number; parts: SerializedGeometry[] } {
   const geometries: BufferGeometry[] = [];
   let triangles = 0;
   for (const polygon of polygons) {
@@ -390,13 +445,67 @@ function extrudeGroundSurfaces(
     geometries.push(geometry);
   }
   const count = geometries.length;
+  const parts = geometries.map((created) => geometryData(created));
   const geometry = geometries.length > 0 ? mergeGeometries(geometries, false) : null;
   for (const created of geometries) created.dispose();
-  return { geometry, triangles, count };
+  return { geometry, triangles, count, parts };
+}
+
+/**
+ * A building's addresses: tags on the building itself first, then every
+ * standalone address node that falls inside one of its (projected) outlines,
+ * deduplicated. Bounding-box prechecks keep the node test cheap on dense tiles.
+ */
+function collectBuildingAddresses(
+  tags: Record<string, string>,
+  polygons: Polygon[],
+  nodes: Array<{ street?: string; housenumber?: string; projected: Position }>,
+): PartAddress[] {
+  const found: PartAddress[] = [];
+  const seen = new Set<string>();
+  const push = (street?: string, housenumber?: string): void => {
+    if (!street && !housenumber) return;
+    const key = `${street ?? ""}|${housenumber ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push({ street, housenumber });
+  };
+
+  push(tags["addr:street"], tags["addr:housenumber"]);
+  if (nodes.length > 0) {
+    for (const polygon of polygons) {
+      const outer = polygon[0];
+      if (!outer || outer.length < 4) continue;
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const [x, y] of outer) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      for (const node of nodes) {
+        const [x, y] = node.projected;
+        if (x < minX || x > maxX || y < minY || y > maxY) continue;
+        if (pointInPolygon(node.projected, polygon)) push(node.street, node.housenumber);
+      }
+    }
+  }
+  return found;
+}
+
+/** Zero-pad element parts into stable, unique export names (`Road_001`, …). */
+function namedParts(prefix: string, parts: SerializedGeometry[]): TilePart[] {
+  return parts.map((geometry, index) => ({
+    name: `${prefix}_${String(index + 1).padStart(3, "0")}`,
+    geometry,
+  }));
 }
 
 export function generateTile(config: GenerateTileConfig, sources: TileSources): GeneratedTile {
-  const { buildings, roads, water, green, paths, rail, trees } = sources;
+  const { buildings, roads, water, green, paths, rail, trees, addresses } = sources;
   if (config.span < 100 || config.span > 2_000) {
     throw new RangeError("Tile Span must be between 100 and 2,000 meters.");
   }
@@ -413,6 +522,16 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
   // Clipped Building Outline footprints, accumulated as the buildings are
   // extruded, so trees can be kept out of Building Massing (see the tree block).
   const buildingFootprints: Polygon[] = [];
+  // Per-element geometries for the individual-object exports. Building names
+  // carry the OSM id; a building clipped into several polygons gets suffixes.
+  const buildingParts: TilePart[] = [];
+  const buildingNamesSeen = new Map<string, number>();
+  const buildingPartName = (id: string): string => {
+    const base = `Building_${id.replace(/[^A-Za-z0-9]+/g, "_")}`;
+    const seen = buildingNamesSeen.get(base) ?? 0;
+    buildingNamesSeen.set(base, seen + 1);
+    return seen === 0 ? base : `${base}_${seen + 1}`;
+  };
   const metrics: TileMetrics = {
     explicit: 0,
     levels: 0,
@@ -463,13 +582,24 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
     triangles: 0,
   };
 
+  // Standalone address nodes, projected once; matched into building outlines
+  // per building below.
+  const addressNodes = (addresses ?? []).map((node) => ({
+    street: node.street,
+    housenumber: node.housenumber,
+    projected: project(node.position, config.center),
+  }));
+
   for (const building of buildings) {
     const resolved = resolveBuildingHeight(building.tags);
     const colors = config.useOsmColors ? resolveBuildingColors(building.tags) : null;
     let generated = false;
     try {
-      for (const polygon of building.polygons) {
-        const projected = polygon.map((ring) => ring.map((point) => project(point, config.center)));
+      const projectedPolygons = building.polygons.map((polygon) =>
+        polygon.map((ring) => ring.map((point) => project(point, config.center))),
+      );
+      const partAddresses = collectBuildingAddresses(building.tags, projectedPolygons, addressNodes);
+      for (const projected of projectedPolygons) {
         const clipped = intersectPolygons([projected], integerClip);
         for (const clippedPolygon of clipped) {
           buildingFootprints.push(clippedPolygon as Polygon);
@@ -490,6 +620,12 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
           applyBuildingRise(geometry, config.span);
           metrics.triangles += triangles;
           geometries.push(geometry);
+          buildingParts.push({
+            name: buildingPartName(building.id),
+            geometry: geometryData(geometry),
+            addresses: partAddresses.length > 0 ? partAddresses : undefined,
+            footprint: clippedPolygon as Polygon,
+          });
           generated = true;
         }
       }
@@ -565,6 +701,7 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
   const {
     geometry: mergedRoads,
     triangles: roadTriangles,
+    parts: roadParts,
   } = extrudeGroundSurfaces(clippedRoads, baseTriangles + metrics.triangles + roadMetrics.triangles, () => {
     merged?.dispose();
     base.dispose();
@@ -615,6 +752,7 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
   const {
     geometry: mergedPaths,
     triangles: pathTriangles,
+    parts: pathParts,
   } = extrudeGroundSurfaces(
     clippedPaths,
     baseTriangles + metrics.triangles + roadMetrics.triangles + pathMetrics.triangles,
@@ -661,6 +799,7 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
   const {
     geometry: mergedRail,
     triangles: railTriangles,
+    parts: railParts,
   } = extrudeGroundSurfaces(
     clippedRail,
     baseTriangles + metrics.triangles + roadMetrics.triangles + pathMetrics.triangles + railMetrics.triangles,
@@ -708,6 +847,7 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
   const {
     geometry: mergedWater,
     triangles: waterTriangles,
+    parts: waterParts,
   } = extrudeGroundSurfaces(
     clippedWater,
     baseTriangles +
@@ -765,6 +905,7 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
     geometry: mergedGreen,
     triangles: greenTriangles,
     count: greenCount,
+    parts: greenParts,
   } = extrudeGroundSurfaces(
     clippedGreen,
     baseTriangles +
@@ -792,6 +933,7 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
   // identical inputs always produce byte-identical geometry.
   const treeMetrics: TreeMetrics = { mapped: 0, scattered: 0, capped: 0, triangles: 0 };
   let mergedTrees: BufferGeometry | null = null;
+  let treeParts: TilePart[] = [];
   if (config.layers?.trees !== false) {
     const forestPolygons: Polygon[] = [];
     for (const source of green) {
@@ -883,7 +1025,10 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
       throw new GeometryBudgetError();
     }
 
-    mergedTrees = buildTreesGeometry(placements);
+    const treeInstances = placements.map((placement) => buildTreeGeometry(placement));
+    mergedTrees = treeInstances.length > 0 ? mergeGeometries(treeInstances, false) : null;
+    treeParts = namedParts("Tree", treeInstances.map((instance) => geometryData(instance)));
+    for (const instance of treeInstances) instance.dispose();
     treeMetrics.mapped = mappedTrees.length;
     treeMetrics.scattered = scattered;
     treeMetrics.capped = capped;
@@ -899,6 +1044,15 @@ export function generateTile(config: GenerateTileConfig, sources: TileSources): 
     pathSurfaces: mergedPaths ? geometryData(mergedPaths) : emptyGeometry(),
     railSurfaces: mergedRail ? geometryData(mergedRail) : emptyGeometry(),
     trees: mergedTrees ? geometryData(mergedTrees) : emptyGeometry(),
+    parts: {
+      buildings: buildingParts,
+      roads: namedParts("Road", roadParts),
+      water: namedParts("Water", waterParts),
+      green: namedParts("Green", greenParts),
+      paths: namedParts("Path", pathParts),
+      rail: namedParts("Rail", railParts),
+      trees: treeParts,
+    },
     metrics,
     roadMetrics,
     waterMetrics,

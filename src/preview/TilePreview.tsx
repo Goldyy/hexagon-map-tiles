@@ -1,5 +1,5 @@
 import { ContactShadows, OrbitControls } from "@react-three/drei";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { useEffect, useMemo, useRef } from "react";
 import {
   BufferAttribute,
@@ -9,8 +9,10 @@ import {
   Vector3,
 } from "three";
 
+import { FRAME_COLOR } from "../domain/print-palette";
 import type { PreviewEnvironment } from "../domain/theme";
 import type { TileColors } from "../export/export-glb";
+import { printTrayGeometry } from "../export/export-obj";
 import type { GeneratedTile, SerializedGeometry } from "../geometry/generate-tile";
 import { resolvePreviewCameraRange } from "./camera";
 import {
@@ -125,19 +127,72 @@ function PreviewAnimator({
   return null;
 }
 
+/** Linear-sRGB vertex color painted onto marked buildings. */
+const MARK_RED: [number, number, number] = [1, 0.04, 0.04];
+
+/**
+ * The brown display tray under and around the tile — the exact geometry the
+ * OBJ print export emits (in world meters), with the map seated on its floor,
+ * so the preview shows the assembled printed result.
+ */
+function FrameMesh({ span, color }: { span: number; color: string }) {
+  const geometry = useMemo(() => hydrate(printTrayGeometry(span)), [span]);
+  const material = useMemo(
+    () => new MeshStandardMaterial({ color: new Color(color), roughness: 0.85, metalness: 0 }),
+    [color],
+  );
+  useEffect(
+    () => () => {
+      geometry.dispose();
+      material.dispose();
+    },
+    [geometry, material],
+  );
+  return <mesh geometry={geometry} material={material} castShadow receiveShadow />;
+}
+
 function TileMeshes({
   tile,
   colors,
   useOsmColors,
   reducedMotion,
+  redBuildings,
+  onBuildingClick,
 }: {
   tile: GeneratedTile;
   colors: TileColors;
   useOsmColors: boolean;
   reducedMotion: boolean;
+  redBuildings: ReadonlySet<string>;
+  onBuildingClick?: (name: string) => void;
 }) {
   const base = useMemo(() => hydrate(tile.base), [tile.base]);
-  const buildings = useMemo(() => hydrate(tile.buildings), [tile.buildings]);
+  // The Buildings geometry always carries a color attribute (white when no OSM
+  // colors are present) so click-marking can paint individual buildings red by
+  // rewriting per-vertex colors without swapping materials.
+  const buildings = useMemo(() => {
+    const geometry = hydrate(tile.buildings);
+    const position = geometry.getAttribute("position");
+    if (position && !geometry.getAttribute("color")) {
+      geometry.setAttribute(
+        "color",
+        new BufferAttribute(new Float32Array(position.count * 3).fill(1), 3),
+      );
+    }
+    return geometry;
+  }, [tile.buildings]);
+
+  // Index ranges of each building inside the merged Buildings geometry.
+  // mergeGeometries concatenates in part order, so cumulative index lengths
+  // recover which building a raycast faceIndex belongs to.
+  const buildingRanges = useMemo(() => {
+    let start = 0;
+    return tile.parts.buildings.map((part) => {
+      const range = { name: part.name, start, end: start + part.geometry.indices.length };
+      start = range.end;
+      return range;
+    });
+  }, [tile.parts.buildings]);
   const roadSurfaces = useMemo(() => hydrate(tile.roadSurfaces), [tile.roadSurfaces]);
   const waterSurfaces = useMemo(() => hydrate(tile.waterSurfaces), [tile.waterSurfaces]);
   const greenSurfaces = useMemo(() => hydrate(tile.greenSurfaces), [tile.greenSurfaces]);
@@ -152,17 +207,52 @@ function TileMeshes({
 
   const buildingsHaveColors = Boolean(tile.buildings.colors && tile.buildings.colors.length > 0);
   const building = useMemo(() => {
-    const vertexColors = useOsmColors && buildingsHaveColors;
+    const osmColors = useOsmColors && buildingsHaveColors;
+    // vertexColors is always on: the geometry always has a color attribute
+    // (white unless OSM colors are active), so the theme color multiplies
+    // through unchanged while marked buildings can be painted per vertex.
     const material = new MeshStandardMaterial({
-      color: new Color(vertexColors ? "#ffffff" : colors.buildings),
+      color: new Color(osmColors ? "#ffffff" : colors.buildings),
       roughness: 0.88,
       metalness: 0,
-      vertexColors,
+      vertexColors: true,
     });
     applyFacadeGradient(material);
     const riseHandle = applyRise(material);
     return { material, riseHandle };
   }, [colors.buildings, useOsmColors, buildingsHaveColors]);
+
+  // Repaint per-vertex colors whenever the marked set changes: restore the
+  // baseline (OSM colors or white), then flood each marked building's range.
+  useEffect(() => {
+    const attribute = buildings.getAttribute("color") as BufferAttribute | undefined;
+    const index = buildings.getIndex();
+    if (!attribute || !index) return;
+    const array = attribute.array as Float32Array;
+    if (useOsmColors && tile.buildings.colors) array.set(tile.buildings.colors);
+    else array.fill(1);
+    for (const range of buildingRanges) {
+      if (!redBuildings.has(range.name)) continue;
+      for (let item = range.start; item < range.end; item += 1) {
+        const vertex = index.getX(item);
+        array[vertex * 3] = MARK_RED[0];
+        array[vertex * 3 + 1] = MARK_RED[1];
+        array[vertex * 3 + 2] = MARK_RED[2];
+      }
+    }
+    attribute.needsUpdate = true;
+  }, [buildings, buildingRanges, redBuildings, useOsmColors, tile.buildings.colors]);
+
+  // Map a click on the merged Buildings mesh back to the individual building
+  // via the raycast faceIndex. `delta` filters out orbit drags that end on the
+  // mesh — only genuine clicks toggle.
+  const handleBuildingClick = (event: ThreeEvent<MouseEvent>) => {
+    if (!onBuildingClick || event.delta > 5 || event.faceIndex == null) return;
+    event.stopPropagation();
+    const position = event.faceIndex * 3;
+    const range = buildingRanges.find((entry) => position >= entry.start && position < entry.end);
+    if (range) onBuildingClick(range.name);
+  };
 
   const water = useMemo(() => {
     const material = createWaterPreviewMaterial(colors.water);
@@ -237,7 +327,13 @@ function TileMeshes({
         <mesh geometry={trees} material={treesMaterial} castShadow receiveShadow />
       )}
       {tile.buildings.positions.length > 0 && (
-        <mesh geometry={buildings} material={building.material} castShadow receiveShadow />
+        <mesh
+          geometry={buildings}
+          material={building.material}
+          castShadow
+          receiveShadow
+          onClick={handleBuildingClick}
+        />
       )}
       <PreviewAnimator
         tile={tile}
@@ -255,7 +351,14 @@ interface PreviewProps {
   environment: PreviewEnvironment;
   span?: number;
   useOsmColors?: boolean;
+  /** Buildings currently marked red (by part name); clicking toggles via onBuildingClick. */
+  redBuildings?: ReadonlySet<string>;
+  onBuildingClick?: (name: string) => void;
+  /** Display-frame color; defaults to the theme brown. */
+  frameColor?: string;
 }
+
+const NO_RED_BUILDINGS: ReadonlySet<string> = new Set();
 
 export function TilePreview({
   tile,
@@ -263,6 +366,9 @@ export function TilePreview({
   environment,
   span = 500,
   useOsmColors = false,
+  redBuildings = NO_RED_BUILDINGS,
+  onBuildingClick,
+  frameColor = FRAME_COLOR,
 }: PreviewProps) {
   const cameraRange = resolvePreviewCameraRange(span);
   const reducedMotion = useReducedMotion();
@@ -315,7 +421,10 @@ export function TilePreview({
           colors={colors}
           useOsmColors={useOsmColors}
           reducedMotion={reducedMotion}
+          redBuildings={redBuildings}
+          onBuildingClick={onBuildingClick}
         />
+        <FrameMesh span={span} color={frameColor} />
         <ContactShadows
           position={[0, -span * 0.011, 0]}
           opacity={0.32}
